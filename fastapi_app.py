@@ -13,6 +13,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
+# Add CORS middleware for specific domains
+allowed_origins = [
+    "https://yourdomain.com",
+    "http://207.180.210.137",
+    "http://localhost:8080",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,  # List of allowed domains
+    allow_credentials=True,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 # Thread pool for CPU-bound operations
 executor = ThreadPoolExecutor(max_workers=4)
 
