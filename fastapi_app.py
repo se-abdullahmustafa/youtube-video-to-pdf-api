@@ -132,7 +132,7 @@ async def convert_video_to_pdf(
     time: str = Query(..., description="Time interval in minutes")
 ):
     try:
-        yt = YouTube(youtube_url, use_po_token=True, on_progress_callback=on_progress)
+        yt = YouTube(youtube_url)
         sanitized_video_id = sanitize_filename(yt.video_id)
         video_folder = f'video_{sanitized_video_id}'
         
