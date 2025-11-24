@@ -1,11 +1,12 @@
 import os
 import re
 import cv2
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+import asyncio
 from pytubefix import YouTube
 from fpdf import FPDF
 from PIL import Image
 import shutil
-import asyncio
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse
 from concurrent.futures import ThreadPoolExecutor
