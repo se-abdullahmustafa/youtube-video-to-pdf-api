@@ -9,6 +9,7 @@ from PIL import Image
 import shutil
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
