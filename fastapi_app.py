@@ -135,6 +135,10 @@ async def convert_video_to_pdf(
         yt = YouTube(youtube_url)
         sanitized_video_id = sanitize_filename(yt.video_id)
         video_folder = f'video_{sanitized_video_id}'
+
+        # Remove existing folder if it exists
+        if os.path.exists(video_folder):
+            await cleanup_folder_async(video_folder)
         
         # Create folder asynchronously
         loop = asyncio.get_event_loop()
