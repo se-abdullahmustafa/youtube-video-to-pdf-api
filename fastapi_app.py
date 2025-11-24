@@ -4,6 +4,7 @@ import cv2
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
 import asyncio
 from pytubefix import YouTube
+from pytubefix.cli import on_progress
 from fpdf import FPDF
 from PIL import Image
 import shutil
