@@ -5,11 +5,14 @@ import yt_dlp
 import uuid
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fpdf import FPDF
+from PIL import Image
 
 # Environment configuration
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'local').lower()
@@ -60,26 +63,60 @@ from pydantic import BaseModel, HttpUrl, Field, validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse as SSEStreamingResponse
+from starlette.datastructures import Headers
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 # Create temp directory if it doesn't exist
 TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Create logs directory if it doesn't exist
+# Logs directory
 LOGS_DIR = "logs"
-os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(os.path.join(LOGS_DIR, 'app.log'))
-    ]
-)
-logger = logging.getLogger(__name__)
+def setup_logging():
+    # Create logs directory if it doesn't exist
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    
+    # Clear any existing handlers
+    logging.getLogger().handlers.clear()
+    
+    # Set up formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Set up console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Set up file handler with rotation (10 MB per file, keep 5 backup files)
+    log_file = os.path.join(LOGS_DIR, 'app.log')
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    
+    # Configure specific loggers
+    logging.getLogger('uvicorn').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
+    
+    return logging.getLogger(__name__)
+
+# Initialize logger
+logger = setup_logging()
 
 # Thread pool for CPU-bound operations
 executor = ThreadPoolExecutor(max_workers=4)
@@ -366,11 +403,16 @@ async def download_pdf(pdf_filename: str):
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found")
     
+    # Encode the filename according to RFC 5987
+    import urllib.parse
+    encoded_filename = urllib.parse.quote(pdf_filename, safe='')
+    content_disposition = f"attachment; filename=\"{pdf_filename}\"; filename*=UTF-8''{encoded_filename}"
+    
     return FileResponse(
         pdf_path,
         media_type='application/pdf',
         filename=pdf_filename,
-        headers={"Content-Disposition": f"attachment; filename=\"{pdf_filename}\""}
+        headers={"Content-Disposition": content_disposition}
     )
 
 def sanitize_filename(file_name: str) -> str:
@@ -710,7 +752,17 @@ async def background_conversion(task_id: str, youtube_url: str, time_interval: i
                     "No frames were extracted from the video. The video might be too short or corrupted.",
                     status_code=status.HTTP_400_BAD_REQUEST
                 )
+            
+            # Delete the video file after successful frame extraction
+            if os.path.exists(video_path):
+                os.remove(video_path)
+                logger.info(f"Deleted video file: {video_path}")
+                
         except Exception as e:
+            # Clean up video file if it exists
+            if 'video_path' in locals() and video_path and os.path.exists(video_path):
+                os.remove(video_path)
+                logger.info(f"Cleaned up video file after error: {video_path}")
             raise FrameExtractionError(
                 f"Error extracting frames: {str(e)}",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -727,6 +779,14 @@ async def background_conversion(task_id: str, youtube_url: str, time_interval: i
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
             logger.info(f"PDF created successfully: {pdf_file}")
+            
+            # Delete all frame files after PDF is created
+            frame_files = [f for f in os.listdir(video_folder) if f.startswith('frame_')]
+            for frame_file in frame_files:
+                frame_path = os.path.join(video_folder, frame_file)
+                if os.path.exists(frame_path):
+                    os.remove(frame_path)
+            logger.info(f"Deleted {len(frame_files)} frame files")
         except Exception as e:
             raise PDFGenerationError(
                 f"Error generating PDF: {str(e)}",
@@ -783,11 +843,16 @@ async def download_pdf(pdf_filename: str):
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found")
     
+    # Encode the filename according to RFC 5987
+    import urllib.parse
+    encoded_filename = urllib.parse.quote(pdf_filename, safe='')
+    content_disposition = f"attachment; filename=\"{pdf_filename}\"; filename*=UTF-8''{encoded_filename}"
+    
     return FileResponse(
         pdf_path,
         media_type='application/pdf',
         filename=pdf_filename,
-        headers={"Content-Disposition": f"attachment; filename=\"{pdf_filename}\""}
+        headers={"Content-Disposition": content_disposition}
     )
 
 if __name__ == '__main__':
