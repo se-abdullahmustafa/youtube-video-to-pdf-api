@@ -17,30 +17,30 @@ ENVIRONMENT = os.getenv('ENVIRONMENT', 'local').lower()
 ENV_CONFIG = {
     'local': {
         'host': '0.0.0.0',
-        'port': 8001,
+        'port': int(os.getenv('PORT', 8000)),
         'cors_origins': [
             'http://localhost:3000',
             'http://localhost:8080',
             'http://127.0.0.1:3000',
         ],
-        'debug': True
+        'debug': os.getenv('DEBUG', 'true').lower() == 'true'
     },
     'staging': {
         'host': '0.0.0.0',
-        'port': 8000,
+        'port': int(os.getenv('PORT', 8000)),
         'cors_origins': [
             'https://staging.ytglancer.com',
             'https://ytglancer.com',
         ],
-        'debug': True
+        'debug': os.getenv('DEBUG', 'true').lower() == 'true'
     },
     'production': {
         'host': '0.0.0.0',
-        'port': 8000,
+        'port': int(os.getenv('PORT', 8000)),
         'cors_origins': [
             'https://ytglancer.com',
         ],
-        'debug': False
+        'debug': os.getenv('DEBUG', 'false').lower() == 'true'
     }
 }
 
@@ -165,8 +165,8 @@ app = FastAPI(
     },
     openapi_tags=[
         {
-            "name": "conversion",
-            "description": "Video to PDF conversion operations"
+            "name": "video-conversion",
+            "description": "YouTube video to PDF conversion operations"
         }
     ]
 )
@@ -362,6 +362,25 @@ async def progress_stream(task_id: str):
         }
     )
 
+@app.get("/download/{pdf_filename}")
+async def download_pdf(pdf_filename: str):
+    """Download the generated PDF"""
+    # Look for PDF in temp folder first, then in root
+    temp_path = os.path.join(TEMP_DIR, pdf_filename)
+    root_path = os.path.join(os.getcwd(), pdf_filename)
+    
+    pdf_path = temp_path if os.path.exists(temp_path) else root_path
+    
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
+    
+    return FileResponse(
+        pdf_path,
+        media_type='application/pdf',
+        filename=pdf_filename,
+        headers={"Content-Disposition": f"attachment; filename=\"{pdf_filename}\""}
+    )
+
 def sanitize_filename(file_name: str) -> str:
     """
     Sanitize a string to be used as a filename.
@@ -449,11 +468,10 @@ async def download_video_async(youtube_url: str, video_folder: str) -> str:
     """
     try:
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]/best',  # Download 480p or lower
             'outtmpl': os.path.join(video_folder, 'video.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'merge_output_format': 'mp4',
             'noplaylist': True,
             'writesubtitles': False,
             'writeautomaticsub': False,
@@ -580,9 +598,9 @@ async def cleanup_folder_async(folder_path):
             "description": "Internal server error"
         }
     },
-    summary="Convert YouTube video to PDF with progress tracking",
+    summary="Convert YouTube Video to PDF",
     description="Converts a YouTube video to a PDF by extracting frames at specified intervals with real-time progress updates",
-    tags=["conversion"]
+    tags=["video-conversion"]
 )
 async def convert_video_to_pdf(
     request: Request,
