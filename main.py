@@ -10,6 +10,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+# Environment configuration
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'local').lower()
+
+# Environment-specific settings
+ENV_CONFIG = {
+    'local': {
+        'host': '0.0.0.0',
+        'port': 8001,
+        'cors_origins': [
+            'http://localhost:3000',
+            'http://localhost:8080',
+            'http://127.0.0.1:3000',
+        ],
+        'debug': True
+    },
+    'staging': {
+        'host': '0.0.0.0',
+        'port': 8000,
+        'cors_origins': [
+            'https://staging.ytglancer.com',
+            'https://ytglancer.com',
+        ],
+        'debug': True
+    },
+    'production': {
+        'host': '0.0.0.0',
+        'port': 8000,
+        'cors_origins': [
+            'https://ytglancer.com',
+        ],
+        'debug': False
+    }
+}
+
+# Get current environment config
+config = ENV_CONFIG.get(ENVIRONMENT, ENV_CONFIG['local'])
+
 from fastapi import (
     FastAPI, 
     Query, 
@@ -30,7 +67,16 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, HttpUrl, Field, validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import StreamingResponse as SSEStreamingResponse
 from concurrent.futures import ThreadPoolExecutor
+
+# Create temp directory if it doesn't exist
+TEMP_DIR = "temp"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# Create logs directory if it doesn't exist
+LOGS_DIR = "logs"
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +84,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('app.log')
+        logging.FileHandler(os.path.join(LOGS_DIR, 'app.log'))
     ]
 )
 logger = logging.getLogger(__name__)
@@ -128,12 +174,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://yourdomain.com",
-        "http://207.180.210.137",
-        "http://localhost:8080",
-        "http://localhost:3000",
-    ],
+    allow_origins=config['cors_origins'],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -234,6 +275,93 @@ async def global_exception_handler(request: Request, exc: Exception):
         content=jsonable_encoder(error_response)
     )
 
+# Progress tracking system
+progress_store: Dict[str, Dict] = {}
+
+class ProgressManager:
+    @classmethod
+    def create_task(cls, task_id: str):
+        progress_store[task_id] = {
+            "step": "starting",
+            "progress": 0,
+            "message": "Initializing conversion...",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    @classmethod
+    def update_progress(cls, task_id: str, step: str, progress: int, message: str):
+        if task_id in progress_store:
+            progress_store[task_id].update({
+                "step": step,
+                "progress": progress,
+                "message": message,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+    
+    @classmethod
+    def get_progress(cls, task_id: str) -> Optional[Dict]:
+        return progress_store.get(task_id)
+    
+    @classmethod
+    def complete_task(cls, task_id: str, pdf_url: str = None):
+        if task_id in progress_store:
+            progress_store[task_id].update({
+                "step": "completed",
+                "progress": 100,
+                "message": "Conversion completed successfully!",
+                "pdf_url": pdf_url,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+    
+    @classmethod
+    def error_task(cls, task_id: str, error_message: str):
+        if task_id in progress_store:
+            progress_store[task_id].update({
+                "step": "error",
+                "progress": 0,
+                "message": f"Error: {error_message}",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+@app.get("/progress/{task_id}")
+async def get_progress(task_id: str):
+    """Get current progress of a conversion task"""
+    progress = ProgressManager.get_progress(task_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse(content=progress)
+
+@app.get("/progress-stream/{task_id}")
+async def progress_stream(task_id: str):
+    """Server-Sent Events stream for real-time progress updates"""
+    async def event_generator():
+        # Check if task exists
+        if task_id not in progress_store:
+            yield f"data: {json.dumps({'error': 'Task not found'})}\n\n"
+            return
+        
+        while True:
+            progress = ProgressManager.get_progress(task_id)
+            if progress:
+                yield f"data: {json.dumps(progress)}\n\n"
+                
+                # Stop streaming if task is completed or errored
+                if progress.get("step") in ["completed", "error"]:
+                    break
+            
+            await asyncio.sleep(1)  # Send updates every second
+    
+    return SSEStreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
 def sanitize_filename(file_name: str) -> str:
     """
     Sanitize a string to be used as a filename.
@@ -299,9 +427,9 @@ def create_pdf_from_frames(output_folder, video_title="video"):
             center_y = (pdf_height - new_height) / 2
             pdf.add_page()
             pdf.image(image_path, x=center_x, y=center_y, w=new_width, h=new_height)
-    # Use video title for PDF filename
+    # Save PDF inside the output folder with YouTube video title as filename
     sanitized_title = sanitize_filename(video_title)
-    pdf_file_name = f'{sanitized_title}.pdf'
+    pdf_file_name = os.path.join(output_folder, f'{sanitized_title}.pdf')
     pdf.output(pdf_file_name)
     return pdf_file_name
 
@@ -433,11 +561,11 @@ async def cleanup_folder_async(folder_path):
 
 @app.get(
     "/convert_video_to_pdf",
-    response_description="Returns the generated PDF file",
+    response_description="Returns task ID for progress tracking",
     responses={
         200: {
-            "content": {"application/pdf": {}},
-            "description": "Returns the generated PDF file",
+            "model": SuccessResponse,
+            "description": "Returns task ID for tracking conversion progress"
         },
         400: {
             "model": ErrorResponse,
@@ -452,15 +580,14 @@ async def cleanup_folder_async(folder_path):
             "description": "Internal server error"
         }
     },
-    summary="Convert YouTube video to PDF",
-    description="Converts a YouTube video to a PDF by extracting frames at specified intervals",
+    summary="Convert YouTube video to PDF with progress tracking",
+    description="Converts a YouTube video to a PDF by extracting frames at specified intervals with real-time progress updates",
     tags=["conversion"]
 )
 async def convert_video_to_pdf(
     request: Request,
-    youtube_url: str = Query(..., description="URL of the YouTube video to convert"),
-    time: int = Query(None, gt=0, le=3600, description="Time interval in seconds between frames (1-3600 seconds)"),
-    time_interval: int = Query(None, gt=0, le=3600, description="Time interval in seconds between frames (1-3600 seconds)"),
+    youtube_url: str = Query(..., description="YouTube video URL"),
+    time_interval: int = Query(..., gt=0, le=3600, description="Time interval in seconds between frames"),
 ):
     """
     Convert a YouTube video to a PDF by extracting frames at specified intervals.
@@ -468,29 +595,42 @@ async def convert_video_to_pdf(
     - **youtube_url**: URL of the YouTube video to convert
     - **time_interval**: Time interval in seconds between frames (1-3600 seconds)
     
-    Returns the generated PDF file for download.
+    Returns a task ID for tracking conversion progress.
     """
     logger.info(f"Starting video to PDF conversion for URL: {youtube_url}")
     
-    # Handle both time and time_interval parameters for backward compatibility
-    if time_interval is None and time is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either 'time' or 'time_interval' parameter is required"
-        )
-    
-    # Use time_interval if provided, otherwise use time
-    final_time_interval = time_interval if time_interval is not None else time
-    
-    if final_time_interval <= 0 or final_time_interval > 3600:
+    # Validate time_interval parameter
+    if time_interval <= 0 or time_interval > 3600:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Time interval must be between 1 and 3600 seconds (1 hour max)"
         )
     
+    # Create task ID for progress tracking
+    task_id = str(uuid.uuid4())
+    ProgressManager.create_task(task_id)
+    
+    # Start conversion in background
+    asyncio.create_task(background_conversion(task_id, youtube_url, time_interval))
+    
+    return JSONResponse(
+        content={
+            "status": "started",
+            "message": "Conversion started successfully",
+            "task_id": task_id,
+            "progress_url": f"/progress/{task_id}",
+            "progress_stream_url": f"/progress-stream/{task_id}"
+        }
+    )
+
+async def background_conversion(task_id: str, youtube_url: str, time_interval: int):
+    """Background task for video conversion with progress updates"""
     video_folder = None
     
     try:
+        # Step 1: Download
+        ProgressManager.update_progress(task_id, "downloading", 10, "Downloading YouTube video...")
+        
         # Validate YouTube URL
         youtube_regex = (
             r'(https?://)?(www\.)?'
@@ -504,8 +644,8 @@ async def convert_video_to_pdf(
             )
 
         # Create a unique folder for this conversion
-        video_id = str(uuid.uuid4())
-        video_folder = f'temp_video_{video_id}'
+        video_id = task_id[:8]  # Use first 8 chars of task ID
+        video_folder = os.path.join(TEMP_DIR, f'temp_video_{video_id}')
         os.makedirs(video_folder, exist_ok=True)
         logger.info(f"Created temporary directory: {video_folder}")
 
@@ -532,6 +672,7 @@ async def convert_video_to_pdf(
 
         # Download the video using yt-dlp
         try:
+            ProgressManager.update_progress(task_id, "downloading", 30, "Downloading video...")
             logger.info("Starting video download...")
             video_path = await download_video_async(youtube_url, video_folder)
             if not video_path or not os.path.exists(video_path):
@@ -546,10 +687,11 @@ async def convert_video_to_pdf(
                 status_code=status.HTTP_400_BAD_REQUEST
             )
 
-        # Extract frames
+        # Step 2: Frame Extraction
+        ProgressManager.update_progress(task_id, "extracting", 50, "Extracting frames from video...")
         try:
             logger.info("Extracting frames...")
-            await extract_frames_async(video_path, video_folder, final_time_interval)
+            await extract_frames_async(video_path, video_folder, time_interval)
             frame_count = len([f for f in os.listdir(video_folder) if f.startswith('frame_')])
             logger.info(f"Extracted {frame_count} frames")
             
@@ -564,7 +706,8 @@ async def convert_video_to_pdf(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # Create PDF
+        # Step 3: PDF Generation
+        ProgressManager.update_progress(task_id, "building_pdf", 80, "Building PDF document...")
         try:
             logger.info("Creating PDF...")
             pdf_file = await create_pdf_async(video_folder, video_title)
@@ -580,38 +723,31 @@ async def convert_video_to_pdf(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # Prepare response
-        response_headers = {
-            "Content-Disposition": f"attachment; filename=\"{sanitize_filename(video_title)}.pdf\"",
-            "X-Request-ID": request.state.request_id if hasattr(request.state, 'request_id') else "",
-            "X-Video-Title": video_title,
-            "X-Frame-Count": str(frame_count),
-            "X-Video-Duration": str(video_duration)
-        }
-
-        # Return the PDF file using StreamingResponse for large files
-        def file_stream():
-            with open(pdf_file, "rb") as f:
-                while chunk := f.read(65536):  # 64KB chunks
-                    yield chunk
-            
-            # Clean up after streaming is complete
-            if os.path.exists(pdf_file):
-                os.remove(pdf_file)
-
-        return StreamingResponse(
-            file_stream(),
-            media_type='application/pdf',
-            headers=response_headers
-        )
+        # Step 4: Done
+        ProgressManager.update_progress(task_id, "done", 95, "Finalizing...")
+        
+        # Move PDF to temp folder
+        pdf_filename = os.path.basename(pdf_file)
+        final_pdf_path = os.path.join(TEMP_DIR, pdf_filename)
+        shutil.move(pdf_file, final_pdf_path)
+        
+        # Clean up temporary folder
+        await cleanup_folder_async(video_folder)
+        
+        # Complete task
+        ProgressManager.complete_task(task_id, f"/download/{pdf_filename}")
+        logger.info(f"Conversion completed successfully for task {task_id}")
 
     except HTTPException:
+        ProgressManager.error_task(task_id, "HTTP error occurred")
         raise
     except VideoProcessingError as e:
         logger.error(f"Video processing error: {str(e)}")
+        ProgressManager.error_task(task_id, str(e))
         raise
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        ProgressManager.error_task(task_id, "An unexpected error occurred")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing your request."
@@ -625,6 +761,34 @@ async def convert_video_to_pdf(
             except Exception as e:
                 logger.error(f"Error during cleanup: {str(e)}")
 
+@app.get("/download/{pdf_filename}")
+async def download_pdf(pdf_filename: str):
+    """Download the generated PDF"""
+    # Look for PDF in temp folder first, then in root
+    temp_path = os.path.join(TEMP_DIR, pdf_filename)
+    root_path = os.path.join(os.getcwd(), pdf_filename)
+    
+    pdf_path = temp_path if os.path.exists(temp_path) else root_path
+    
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
+    
+    return FileResponse(
+        pdf_path,
+        media_type='application/pdf',
+        filename=pdf_filename,
+        headers={"Content-Disposition": f"attachment; filename=\"{pdf_filename}\""}
+    )
+
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"Starting server in {ENVIRONMENT} environment...")
+    print(f"Server will be available at http://{config['host']}:{config['port']}")
+    print(f"CORS origins: {config['cors_origins']}")
+    
+    uvicorn.run(
+        app, 
+        host=config['host'], 
+        port=config['port'],
+        reload=config['debug']
+    )

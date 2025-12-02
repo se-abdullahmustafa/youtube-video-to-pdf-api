@@ -5,7 +5,8 @@ A high-performance FastAPI service that converts YouTube videos to PDF by extrac
 ## Features
 
 - Convert YouTube videos to PDF documents using yt-dlp for reliable downloads
-- Configurable frame extraction intervals (in minutes)
+- Configurable frame extraction intervals (in seconds)
+- Real-time progress tracking with Server-Sent Events (SSE)
 - Asynchronous processing for better performance
 - Built with FastAPI for high performance and automatic API documentation
 - CORS enabled for web application integration
@@ -13,7 +14,8 @@ A high-performance FastAPI service that converts YouTube videos to PDF by extrac
 - PDF generation with proper image scaling and formatting
 - Automatic cleanup of temporary files
 - Support for various YouTube URL formats
-- Proper error handling and validation
+- Production-grade error handling and validation
+- Dedicated temp folder for downloads and conversions
 
 ## Prerequisites
 
@@ -43,10 +45,70 @@ A high-performance FastAPI service that converts YouTube videos to PDF by extrac
 1. Start the FastAPI server:
 
    ```bash
-   python fastapi_app.py
+   python main.py
    ```
 
 2. The API will be available at `http://127.0.0.1:8000`
+
+## Project Structure
+
+```
+youtube-video-to-pdf-api/
+├── main.py                 # Main FastAPI application
+├── requirements.txt        # Python dependencies
+├── README.md              # This file
+├── .gitignore             # Git ignore file
+├── .env.local             # Local environment config
+├── .env.staging           # Staging environment config
+├── .env.production        # Production environment config
+├── temp/                  # Temporary folder for downloads and conversions
+│   └── temp_video_*/      # Individual conversion folders
+│       ├── video.mp4      # Downloaded YouTube video
+│       ├── frame_*.jpg    # Extracted frames
+│       └── video_title.pdf # Generated PDF
+└── logs/                  # Logs folder
+    └── app.log            # Application logs
+```
+
+## Environments
+
+This application supports three environments:
+
+### Local Development
+
+- **Frontend**: http://localhost:3000
+- **API**: http://localhost:8001
+- **Environment file**: `.env.local`
+- **Features**: Debug mode enabled, hot reload
+
+### Staging
+
+- **Frontend**: https://staging.ytglancer.com
+- **API**: Port 8000
+- **Environment file**: `.env.staging`
+- **Features**: Debug mode enabled, testing environment
+
+### Production
+
+- **Frontend**: https://ytglancer.com
+- **API**: Port 8000
+- **Environment file**: `.env.production`
+- **Features**: Optimized for performance, no debug mode
+
+### Running in Different Environments
+
+```bash
+# Local (default)
+python main.py
+
+# Set environment explicitly
+ENVIRONMENT=staging python main.py
+ENVIRONMENT=production python main.py
+
+# Or use environment files
+cp .env.staging .env
+python main.py
+```
 
 ## API Documentation
 
@@ -59,25 +121,60 @@ Once the server is running, you can access the interactive API documentation:
 
 ### Convert YouTube Video to PDF
 
+**Endpoint**: `GET /convert_video_to_pdf`
+
+**Parameters**:
+
+- `youtube_url` (string, required): YouTube video URL
+- `time_interval` (integer, required): Time interval in seconds between frames (1-3600)
+
+**Response**: Returns a task ID for progress tracking
+
+**Example**:
+
+```bash
+curl "http://127.0.0.1:8000/convert_video_to_pdf?youtube_url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&time_interval=30"
 ```
-GET /convert_video_to_pdf
-```
 
-**Parameters:**
+### Progress Tracking
 
-- `youtube_url` (required): The URL of the YouTube video to convert (supports various YouTube URL formats)
-- `time` (required): Time interval in minutes between frames (must be a positive integer)
+**Get Progress**: `GET /progress/{task_id}`
 
-**Example Request:**
+**Real-time Progress Stream**: `GET /progress-stream/{task_id}`
 
-```
-GET /convert_video_to_pdf?youtube_url=https://www.youtube.com/watch?v=example&time=1
+**Download PDF**: `GET /download/{pdf_filename}`
+
+**Progress Steps**:
+
+1. `downloading` (10-30%): Downloading YouTube video
+2. `extracting` (50%): Extracting frames from video
+3. `building_pdf` (80%): Building PDF document
+4. `done` (95-100%): Finalizing and completing
+
+**JavaScript Example for Real-time Progress**:
+
+```javascript
+// Start conversion
+const response = await fetch(
+  "/convert_video_to_pdf?youtube_url=URL&time_interval=30"
+);
+const { task_id, progress_stream_url } = await response.json();
+
+// Listen to real-time progress
+const eventSource = new EventSource(progress_stream_url);
+eventSource.onmessage = (event) => {
+  const progress = JSON.parse(event.data);
+  console.log(progress.step, progress.progress, progress.message);
+
+  if (progress.step === "completed") {
+    window.location.href = progress.pdf_url;
+  }
+};
 ```
 
 **Response:**
 
 - Returns the generated PDF file for download with the video title as the filename
-- Proper MIME type: `application/pdf`
 - Content-Disposition header for proper download handling
 
 ## Environment Variables
