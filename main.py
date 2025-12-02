@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from fpdf import FPDF
 
 # Environment configuration
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'local').lower()
@@ -25,18 +26,9 @@ ENV_CONFIG = {
         ],
         'debug': os.getenv('DEBUG', 'true').lower() == 'true'
     },
-    'staging': {
-        'host': '0.0.0.0',
-        'port': int(os.getenv('PORT', 8000)),
-        'cors_origins': [
-            'https://staging.ytglancer.com',
-            'https://ytglancer.com',
-        ],
-        'debug': os.getenv('DEBUG', 'true').lower() == 'true'
-    },
     'production': {
         'host': '0.0.0.0',
-        'port': int(os.getenv('PORT', 8000)),
+        'port': int(os.getenv('PORT', 80)),
         'cors_origins': [
             'https://ytglancer.com',
         ],
