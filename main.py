@@ -403,15 +403,18 @@ async def download_pdf(pdf_filename: str):
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found")
     
-    # Encode the filename according to RFC 5987
-    import urllib.parse
-    encoded_filename = urllib.parse.quote(pdf_filename, safe='')
-    content_disposition = f"attachment; filename=\"{pdf_filename}\"; filename*=UTF-8''{encoded_filename}"
+    # Create a safe filename for the header
+    safe_filename = pdf_filename.encode('ascii', errors='ignore').decode('ascii')
+    if not safe_filename or len(safe_filename) < 3:
+        safe_filename = "video.pdf"
+    
+    # Use only the safe filename in the header
+    content_disposition = f"attachment; filename=\"{safe_filename}\""
     
     return FileResponse(
         pdf_path,
         media_type='application/pdf',
-        filename=pdf_filename,
+        filename=safe_filename,
         headers={"Content-Disposition": content_disposition}
     )
 
@@ -843,15 +846,18 @@ async def download_pdf(pdf_filename: str):
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found")
     
-    # Encode the filename according to RFC 5987
-    import urllib.parse
-    encoded_filename = urllib.parse.quote(pdf_filename, safe='')
-    content_disposition = f"attachment; filename=\"{pdf_filename}\"; filename*=UTF-8''{encoded_filename}"
+    # Create a safe filename for the header
+    safe_filename = pdf_filename.encode('ascii', errors='ignore').decode('ascii')
+    if not safe_filename or len(safe_filename) < 3:
+        safe_filename = "video.pdf"
+    
+    # Use only the safe filename in the header
+    content_disposition = f"attachment; filename=\"{safe_filename}\""
     
     return FileResponse(
         pdf_path,
         media_type='application/pdf',
-        filename=pdf_filename,
+        filename=safe_filename,
         headers={"Content-Disposition": content_disposition}
     )
 
