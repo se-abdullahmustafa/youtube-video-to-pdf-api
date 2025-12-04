@@ -23,9 +23,9 @@ ENV_CONFIG = {
         'host': '0.0.0.0',
         'port': int(os.getenv('PORT', 8000)),
         'cors_origins': [
-            'http://localhost:3000',
+            'http://localhost:3001',
             'http://localhost:8080',
-            'http://127.0.0.1:3000',
+            'http://127.0.0.1:3001',
         ],
         'debug': os.getenv('DEBUG', 'true').lower() == 'true'
     },
