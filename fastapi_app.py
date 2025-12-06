@@ -17,7 +17,7 @@ app = FastAPI()
 
 # Add CORS middleware for specific domains
 allowed_origins = [
-    "https://yourdomain.com",
+    "https://api.rajag.site",
     "http://207.180.210.137",
     "http://localhost:8080",
 ]
