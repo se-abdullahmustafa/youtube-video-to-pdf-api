@@ -1,7 +1,6 @@
 import os
 import re
 import cv2
-
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
 import asyncio
 import yt_dlp
@@ -33,10 +32,8 @@ app.add_middleware(
 # Thread pool for CPU-bound operations
 executor = ThreadPoolExecutor(max_workers=4)
 
-
 def sanitize_filename(file_name):
     return re.sub(r'[<>:"/\\|?*]', '_', file_name)
-
 
 def extract_frames(video_path, output_folder, minutes):
     video_capture = cv2.VideoCapture(video_path)
@@ -58,7 +55,6 @@ def extract_frames(video_path, output_folder, minutes):
             frame_path = os.path.join(output_folder, f'frame_{i}.jpg')
             cv2.imwrite(frame_path, image)
     video_capture.release()
-
 
 def create_pdf_from_frames(output_folder):
     pdf = FPDF(format='A4')  # Adjust format as needed
@@ -83,12 +79,11 @@ def create_pdf_from_frames(output_folder):
     pdf.output(pdf_file_name)
     return pdf_file_name
 
-
 def download_video_with_ytdlp(youtube_url, video_folder):
     """Download video using yt-dlp"""
     video_file_name = 'video.mp4'
     output_path = os.path.join(video_folder, video_file_name)
-
+    
     ydl_opts = {
         'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'outtmpl': output_path,
@@ -99,7 +94,7 @@ def download_video_with_ytdlp(youtube_url, video_folder):
         'fragment_retries': 10,
         'file_access_retries': 10,
         'extractor_retries': 10,
-        'socket_timeout': 60,
+        'socket_timeout': 30,
         'http_chunk_size': 10485760,  # 10MB chunks
         'extractor_args': {
             'youtube': {
@@ -108,12 +103,11 @@ def download_video_with_ytdlp(youtube_url, video_folder):
             }
         },
     }
-
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([youtube_url])
-
+    
     return video_file_name
-
 
 def get_video_id_from_url(youtube_url):
     """Extract video ID from YouTube URL"""
@@ -122,23 +116,21 @@ def get_video_id_from_url(youtube_url):
         'no_warnings': True,
         'extract_flat': True,
     }
-
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(youtube_url, download=False)
         return info.get('id', 'video')
-
 
 async def download_video_async(youtube_url, video_folder):
     loop = asyncio.get_event_loop()
     # Run blocking download in thread pool
     video_file_name = await loop.run_in_executor(
-        executor,
+        executor, 
         download_video_with_ytdlp,
         youtube_url,
         video_folder
     )
     return video_file_name
-
 
 async def get_video_id_async(youtube_url):
     loop = asyncio.get_event_loop()
@@ -149,7 +141,6 @@ async def get_video_id_async(youtube_url):
         youtube_url
     )
     return video_id
-
 
 async def extract_frames_async(video_path, output_folder, minutes):
     loop = asyncio.get_event_loop()
@@ -162,7 +153,6 @@ async def extract_frames_async(video_path, output_folder, minutes):
         minutes
     )
 
-
 async def create_pdf_async(output_folder):
     loop = asyncio.get_event_loop()
     # Run PDF creation in thread pool
@@ -173,7 +163,6 @@ async def create_pdf_async(output_folder):
     )
     return pdf_file
 
-
 async def cleanup_folder_async(folder_path):
     loop = asyncio.get_event_loop()
     # Run file cleanup in thread pool
@@ -183,19 +172,35 @@ async def cleanup_folder_async(folder_path):
         folder_path
     )
 
+async def cleanup_files(video_folder, pdf_file):
+    """Cleanup files after response is sent"""
+    await asyncio.sleep(2)  # Wait for file to be sent
+    try:
+        if video_folder and os.path.exists(video_folder):
+            await cleanup_folder_async(video_folder)
+    except Exception as e:
+        print(f"Error cleaning up video folder: {e}")
+    
+    try:
+        if pdf_file and os.path.exists(pdf_file):
+            os.remove(pdf_file)
+    except Exception as e:
+        print(f"Error cleaning up PDF file: {e}")
 
 @app.get('/convert_video_to_pdf')
 async def convert_video_to_pdf(
-        youtube_url: str = Query(..., description="YouTube video URL"),
-        time: str = Query(..., description="Time interval in minutes")
+    youtube_url: str = Query(..., description="YouTube video URL"),
+    time: str = Query(..., description="Time interval in minutes")
 ):
-    video_folder = ''
+    video_folder = None
+    pdf_file = None
+    
     try:
         # Get video ID
         video_id = await get_video_id_async(youtube_url)
         sanitized_video_id = sanitize_filename(video_id)
         video_folder = f'video_{sanitized_video_id}'
-
+        
         # Create folder asynchronously
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
@@ -204,38 +209,42 @@ async def convert_video_to_pdf(
             video_folder,
             True
         )
-
+        
         # Download video
         video_file_name = await download_video_async(youtube_url, video_folder)
-
+        
         if not video_file_name:
             raise HTTPException(status_code=404, detail='No downloadable video found')
-
+        
         # Extract frames
         video_path = os.path.join(video_folder, video_file_name)
         await extract_frames_async(video_path, video_folder, time)
-
+        
         # Create PDF
         pdf_file = await create_pdf_async(video_folder)
-
-        # Cleanup video folder
-        await cleanup_folder_async(video_folder)
-
-        # Return PDF file
+        
+        # Return PDF file with background cleanup
         return FileResponse(
-            pdf_file,
+            pdf_file, 
             media_type='application/pdf',
-            filename=os.path.basename(pdf_file)
+            filename=os.path.basename(pdf_file),
+            background=lambda: asyncio.create_task(cleanup_files(video_folder, pdf_file))
         )
-
+        
     except Exception as e:
-        # Cleanup video folder
-        if video_folder and video_folder != '':
-            await cleanup_folder_async(video_folder)
+        # Cleanup on error
+        if video_folder and os.path.exists(video_folder):
+            try:
+                await cleanup_folder_async(video_folder)
+            except:
+                pass
+        if pdf_file and os.path.exists(pdf_file):
+            try:
+                os.remove(pdf_file)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
-
 
 if __name__ == '__main__':
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
