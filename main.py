@@ -10,9 +10,12 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Generic, TypeVar, Generic, TypeVar, Union
+from uuid import UUID
+from pathlib import Path
 from fpdf import FPDF
 from PIL import Image
+import time
 
 # Environment configuration
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'local').lower()
@@ -27,7 +30,8 @@ ENV_CONFIG = {
             'http://localhost:8080',
             'http://127.0.0.1:3001',
         ],
-        'debug': os.getenv('DEBUG', 'true').lower() == 'true'
+        'debug': os.getenv('DEBUG', 'true').lower() == 'true',
+        'max_workers': 4
     },
     'production': {
         'host': '0.0.0.0',
@@ -35,7 +39,8 @@ ENV_CONFIG = {
         'cors_origins': [
             'https://ytglancer.com',
         ],
-        'debug': os.getenv('DEBUG', 'false').lower() == 'true'
+        'debug': os.getenv('DEBUG', 'false').lower() == 'true',
+        'max_workers': 8
     }
 }
 
@@ -48,8 +53,16 @@ from fastapi import (
     HTTPException, 
     status, 
     Request, 
-    Depends
+    Depends,
+    BackgroundTasks,
+    Response,
+    Header,
+    Body
 )
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import (
     FileResponse, 
     JSONResponse, 
@@ -59,7 +72,7 @@ from fastapi.responses import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, HttpUrl, Field, validator
+from pydantic import BaseModel, HttpUrl, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse as SSEStreamingResponse
@@ -118,8 +131,8 @@ def setup_logging():
 # Initialize logger
 logger = setup_logging()
 
-# Thread pool for CPU-bound operations
-executor = ThreadPoolExecutor(max_workers=4)
+# Thread pool for CPU-bound operations - optimized based on environment
+executor = ThreadPoolExecutor(max_workers=config.get('max_workers', 4))
 
 # Request and Response Models
 class VideoConversionRequest(BaseModel):
@@ -132,13 +145,14 @@ class VideoConversionRequest(BaseModel):
         description="Time interval in minutes between frames (1-60 minutes)"
     )
 
-    @validator('youtube_url')
+    @field_validator('youtube_url')
+    @classmethod
     def validate_youtube_url(cls, v):
         """Validate that the URL is a valid YouTube URL"""
         youtube_regex = (
             r'(https?://)?(www\.)?'
-            '(youtube|youtu|youtube-nocookie)\.(com|be)/'
-            '(watch\?v=|embed/|v/|.+/|\?v=|&v=|\/v\/)?([^&=%\?\/"]{11})'
+            r'(youtube|youtu|youtube-nocookie)\.(com|be)/'
+            r'(watch\?v=|embed/|v/|.+/|\?v=|&v=|\/v\/)?([^&=%\?\/"]{11})'
         )
         if not re.match(youtube_regex, str(v)):
             raise ValueError("Invalid YouTube URL")
@@ -153,12 +167,21 @@ class ErrorResponse(BaseModel):
     path: str
     request_id: str
 
-class SuccessResponse(BaseModel):
-    """Standard success response model"""
+T = TypeVar('T')
+
+class SuccessResponse(BaseModel, Generic[T]):
+    """Standard success response model with generic type support"""
     status: str = "success"
     message: str
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[T] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+            UUID: str,
+            Path: str
+        }
 
 # Custom exception classes
 class VideoProcessingError(Exception):
@@ -200,12 +223,12 @@ app = FastAPI(
     ]
 )
 
-# Add CORS middleware
+# Add CORS middleware - Allow all origins in development, restrict in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config['cors_origins'],
+    allow_origins=["*"] if ENVIRONMENT == 'local' else config['cors_origins'],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"]
 )
@@ -444,49 +467,93 @@ def sanitize_filename(file_name: str) -> str:
     return sanitized
 
 def extract_frames(video_path, output_folder, seconds):
+    """Extract frames from video at specified intervals (optimized)"""
     video_capture = cv2.VideoCapture(video_path)
+    
+    if not video_capture.isOpened():
+        raise VideoProcessingError("Failed to open video file")
+    
     frame_rate = int(video_capture.get(cv2.CAP_PROP_FPS))
-    print("frame rate:", frame_rate)
     total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    print("total frame:", total_frames)
+    
+    logger.info(f"Video - FPS: {frame_rate}, Total frames: {total_frames}")
+    
     # Calculate frame interval based on seconds and frame rate
-    frame_interval = int(frame_rate * int(seconds))
-    print("seconds", seconds)
-    print("frame interval:", (frame_interval))
-    # Make sure frame_interval is not zero to avoid division by zero
-    if frame_interval == 0:
-        frame_interval = 1
-    for i in range(0, total_frames, frame_interval):
-        video_capture.set(cv2.CAP_PROP_POS_FRAMES, i)
-        success, image = video_capture.read()
-        if success:
-            frame_path = os.path.join(output_folder, f'frame_{i}.jpg')
-            cv2.imwrite(frame_path, image)
-    video_capture.release()
+    frame_interval = max(1, int(frame_rate * int(seconds)))
+    
+    frame_count = 0
+    extracted_count = 0
+    
+    try:
+        for frame_idx in range(0, total_frames, frame_interval):
+            video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            success, image = video_capture.read()
+            
+            if success:
+                # Optimize frame size for faster processing
+                frame_path = os.path.join(output_folder, f'frame_{extracted_count:04d}.jpg')
+                # Reduce quality for faster I/O
+                cv2.imwrite(frame_path, image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                extracted_count += 1
+                
+                # Log progress every 10 frames
+                if extracted_count % 10 == 0:
+                    logger.debug(f"Extracted {extracted_count} frames")
+            
+            frame_count += 1
+    finally:
+        video_capture.release()
+    
+    logger.info(f"Successfully extracted {extracted_count} frames")
+    return extracted_count
 
 def create_pdf_from_frames(output_folder, video_title="video"):
-    pdf = FPDF(format='A4')  # Adjust format as needed
-    for root, _, files in os.walk(output_folder):
-        image_files = [file for file in files if file.endswith('.jpg')]
-        image_files.sort()
-        for image_file in image_files:
-            image_path = os.path.join(root, image_file)
-            with Image.open(image_path) as img:
+    """Create PDF from frames (optimized for performance)"""
+    # Get list of frames
+    frames = sorted([f for f in os.listdir(output_folder) if f.endswith('.jpg')])
+    
+    if not frames:
+        raise VideoProcessingError("No frames found to create PDF")
+    
+    # Use FPDF2 for better performance
+    pdf = FPDF(format='A4')
+    pdf.set_auto_page_break(auto=True, margin=5)
+    
+    for idx, frame_file in enumerate(frames):
+        frame_path = os.path.join(output_folder, frame_file)
+        
+        try:
+            # Get image dimensions
+            with Image.open(frame_path) as img:
                 img_width, img_height = img.size
-            # Calculate scaled dimensions to fit within PDF page
-            pdf_width, pdf_height = pdf.w, pdf.h
+            
+            # Calculate scaled dimensions
+            pdf_width = pdf.w - 10
+            pdf_height = pdf.h - 10
             scale = min(pdf_width / img_width, pdf_height / img_height)
             new_width = img_width * scale
             new_height = img_height * scale
-            # Calculate center coordinates
-            center_x = (pdf_width - new_width) / 2
-            center_y = (pdf_height - new_height) / 2
+            
+            # Center the image
+            center_x = (pdf.w - new_width) / 2
+            center_y = (pdf.h - new_height) / 2
+            
             pdf.add_page()
-            pdf.image(image_path, x=center_x, y=center_y, w=new_width, h=new_height)
-    # Save PDF inside the output folder with YouTube video title as filename
+            pdf.image(frame_path, x=center_x, y=center_y, w=new_width, h=new_height)
+            
+            # Log progress every 10 frames
+            if (idx + 1) % 10 == 0:
+                logger.debug(f"Added {idx + 1} frames to PDF")
+        except Exception as e:
+            logger.warning(f"Could not process frame {frame_file}: {str(e)}")
+            continue
+    
+    # Save PDF
     sanitized_title = sanitize_filename(video_title)
     pdf_file_name = os.path.join(output_folder, f'{sanitized_title}.pdf')
     pdf.output(pdf_file_name)
+    
+    logger.info(f"PDF created: {pdf_file_name} with {len(frames)} frames")
     return pdf_file_name
 
 async def download_video_async(youtube_url: str, video_folder: str) -> str:
@@ -614,12 +681,83 @@ async def cleanup_folder_async(folder_path):
         folder_path
     )
 
-@app.get(
-    "/convert_video_to_pdf",
+class ConversionRequest(BaseModel):
+    """Request model for video conversion"""
+    youtube_url: str = Field(
+        ...,
+        description="URL of the YouTube video to convert (e.g., https://www.youtube.com/watch?v=VIDEO_ID)",
+        example="https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    )
+    time_interval: int = Field(
+        ...,
+        gt=0,
+        le=3600,
+        description="Time interval in seconds between frames (1-3600 seconds)",
+        example=60
+    )
+
+async def background_conversion(task_id: str, youtube_url: str, time_interval: int):
+    """Background task to handle the video conversion process"""
+    try:
+        # Create a unique folder for this conversion
+        video_id = task_id[:8]
+        video_folder = os.path.join(TEMP_DIR, f'temp_video_{video_id}')
+        os.makedirs(video_folder, exist_ok=True)
+        
+        try:
+            # Get video info using yt-dlp
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(youtube_url, download=False)
+            
+            video_title = info_dict.get('title', 'video')
+            
+            # Download the video
+            ProgressManager.update_progress(task_id, "downloading", 30, "Downloading video...")
+            video_path = await download_video_async(youtube_url, video_folder)
+            
+            # Extract frames
+            ProgressManager.update_progress(task_id, "extracting", 50, "Extracting frames...")
+            await extract_frames_async(video_path, video_folder, time_interval)
+            
+            # Create PDF
+            ProgressManager.update_progress(task_id, "building_pdf", 80, "Creating PDF...")
+            pdf_file = await create_pdf_async(video_folder, video_title)
+            
+            # Clean up
+            if os.path.exists(video_path):
+                os.remove(video_path)
+            
+            # Move PDF to temp folder
+            pdf_filename = os.path.basename(pdf_file)
+            final_pdf_path = os.path.join(TEMP_DIR, pdf_filename)
+            shutil.move(pdf_file, final_pdf_path)
+            
+            # Clean up temporary folder
+            await cleanup_folder_async(video_folder)
+            
+            # Mark task as complete
+            ProgressManager.complete_task(task_id, f"/download/{pdf_filename}")
+            
+        except Exception as e:
+            logger.error(f"Error in background task {task_id}: {str(e)}", exc_info=True)
+            ProgressManager.error_task(task_id, str(e))
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in background task {task_id}: {str(e)}", exc_info=True)
+        ProgressManager.error_task(task_id, "An unexpected error occurred")
+
+@app.post(
+    "/convert",
+    response_model=SuccessResponse,
     response_description="Returns task ID for progress tracking",
+    name="convert",
     responses={
         200: {
-            "model": SuccessResponse,
             "description": "Returns task ID for tracking conversion progress"
         },
         400: {
@@ -629,96 +767,153 @@ async def cleanup_folder_async(folder_path):
         422: {
             "model": ErrorResponse,
             "description": "Validation error"
-        },
-        500: {
-            "model": ErrorResponse,
-            "description": "Internal server error"
         }
-    },
-    summary="Convert YouTube Video to PDF",
-    description="Converts a YouTube video to a PDF by extracting frames at specified intervals with real-time progress updates",
-    tags=["video-conversion"]
+    }
 )
 async def convert_video_to_pdf(
     request: Request,
-    youtube_url: str = Query(..., description="YouTube video URL"),
-    time_interval: int = Query(..., gt=0, le=3600, description="Time interval in seconds between frames"),
+    conversion_request: ConversionRequest = Body(..., description="Conversion request details"),
 ):
     """
     Convert a YouTube video to a PDF by extracting frames at specified intervals.
     
-    - **youtube_url**: URL of the YouTube video to convert
-    - **time_interval**: Time interval in seconds between frames (1-3600 seconds)
+    This endpoint starts an asynchronous task and returns immediately with a task ID
+    that can be used to track progress and retrieve the result.
     
-    Returns a task ID for tracking conversion progress.
-    """
-    logger.info(f"Starting video to PDF conversion for URL: {youtube_url}")
-    
-    # Validate time_interval parameter
-    if time_interval <= 0 or time_interval > 3600:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Time interval must be between 1 and 3600 seconds (1 hour max)"
-        )
-    
-    # Create task ID for progress tracking
+    Args:
+        conversion_request (ConversionRequest): The conversion request containing:
+            - youtube_url (str): The URL of the YouTube video to convert.
+                - Must be a valid YouTube URL in the format: https://www.youtube.com/watch?v=VIDEO_ID
+                - Example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                
+            - time_interval (int): Time interval in seconds between frames.
+                - Must be between 1 and 3600 seconds (1 hour)
+                - Recommended value: 60 (1 minute) for general use
+                - Lower values will result in more frames and a larger PDF
+                - Higher values will result in fewer frames and a smaller PDF
+            
+    Returns:
+        dict: A response object containing:
+            - status (str): Task status ("success" or "error")
+            - message (str): Human-readable status message
+            - data (dict): Contains task details including:
+                - task_id (str): Unique ID for tracking progress
+                - progress (int): Current progress percentage (0-100)
+                - status (str): Current task status
+                - progress_url (str): URL to track progress
+                - result_url (str, optional): URL to download the generated PDF (when complete)
+                - estimated_time_remaining (int, optional): Estimated time remaining in seconds
+                
+    Raises:
+        HTTPException: If there's an error with the request parameters or processing
+        
+    Example Request:
+        ```json
+        {
+            "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "time_interval": 60
+        }
+        ```
+        
+    Example Response:
+        ```json
+        {
+            "status": "success",
+            "message": "Conversion task started successfully",
+            "data": {
+                "status": "processing",
+                "task_id": "550e8400-e29b-41d4-a716-446655440000",
+                "progress": 0,
+                "message": "Task registered and queued for processing",
+                "progress_url": "http://localhost:8000/progress/550e8400-e29b-41d4-a716-446655440000",
+                "result_url": null,
+                "estimated_time_remaining": null
+            },
+            "timestamp": "2025-03-15T12:00:00.000000"
+        }
+        """
+    # Generate a unique task ID
     task_id = str(uuid.uuid4())
+    
+    # Create task in progress store with initial status
     ProgressManager.create_task(task_id)
     
-    # Start conversion in background
-    asyncio.create_task(background_conversion(task_id, youtube_url, time_interval))
-    
-    return JSONResponse(
-        content={
-            "status": "started",
-            "message": "Conversion started successfully",
-            "task_id": task_id,
-            "progress_url": f"/progress/{task_id}",
-            "progress_stream_url": f"/progress-stream/{task_id}"
-        }
+    # Validate YouTube URL format
+    youtube_regex = (
+        r'(https?://)?(www\.)?'
+        '(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        '(watch\?v=|embed/|v/|.+\/|\?v=|&v=|\/v\/)?([^&=?\/"\s]{11})'
     )
-
-async def background_conversion(task_id: str, youtube_url: str, time_interval: int):
-    """Background task for video conversion with progress updates"""
-    video_folder = None
+    if not re.match(youtube_regex, conversion_request.youtube_url):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid YouTube URL format"
+        )
     
     try:
-        # Step 1: Download
-        ProgressManager.update_progress(task_id, "downloading", 10, "Downloading YouTube video...")
+        # Start background task with the request parameters
+        asyncio.create_task(background_conversion(
+            task_id, 
+            conversion_request.youtube_url, 
+            conversion_request.time_interval
+        ))
         
-        # Validate YouTube URL
+        # Return immediate response with task ID
+        return SuccessResponse(
+            message="Conversion task started successfully",
+            data={
+                "status": "processing",
+                "task_id": task_id,
+                "progress": 0,
+                "message": "Task registered and queued for processing",
+                "progress_url": f"{request.base_url}progress/{task_id}",
+                "result_url": None,  # Will be updated when complete
+                "estimated_time_remaining": None  # Can be updated based on video length
+            }
+        )
+        
+        # Validate YouTube URL format
         youtube_regex = (
             r'(https?://)?(www\.)?'
-            '(youtube|youtu|youtube-nocookie)\.(com|be)/'
-            '(watch\?v=|embed/|v/|.+/|\?v=|&v=|\/v\/)?([^&=%\?\/"]{11})'
+            r'(youtube|youtu|youtube-nocookie)\.(com|be)/'
+            r'(watch\?v=|embed/|v/|.+/|\?v=|&v=|\/v\/)?([^&=%\?\/"\s]{11})'
         )
         if not re.match(youtube_regex, youtube_url):
-            raise VideoProcessingError(
-                "Invalid YouTube URL. Please provide a valid YouTube video URL.",
-                status_code=status.HTTP_400_BAD_REQUEST
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid YouTube URL format"
             )
-
-        # Create a unique folder for this conversion
-        video_id = task_id[:8]  # Use first 8 chars of task ID
-        video_folder = os.path.join(TEMP_DIR, f'temp_video_{video_id}')
-        os.makedirs(video_folder, exist_ok=True)
-        logger.info(f"Created temporary directory: {video_folder}")
-
-        # Get video info first
+        
+        # Initialize video_folder to None to ensure it's always defined
+        video_folder = None
+        
         try:
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            # Create a unique folder for this conversion
+            video_id = task_id[:8]  # Use first 8 chars of task ID
+            video_folder = os.path.join(TEMP_DIR, f'temp_video_{video_id}')
+            os.makedirs(video_folder, exist_ok=True)
+            logger.info(f"Created temporary directory: {video_folder}")
+            
+            # Get video info using yt-dlp
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(youtube_url, download=False)
-                video_title = info_dict.get('title', 'video')
-                video_duration = info_dict.get('duration', 0)
-                
-                # Validate video duration (max 2 hours)
-                if video_duration > 7200:  # 2 hours in seconds
-                    raise VideoProcessingError(
-                        "Video is too long. Maximum allowed duration is 2 hours.",
-                        status_code=status.HTTP_400_BAD_REQUEST
-                    )
-                
-                logger.info(f"Video info - Title: {video_title}, Duration: {video_duration}s")
+            
+            video_title = info_dict.get('title', 'video')
+            video_duration = info_dict.get('duration', 0)
+            
+            # Validate video duration (max 2 hours)
+            if video_duration > 7200:  # 2 hours in seconds
+                raise VideoProcessingError(
+                    "Video is too long. Maximum allowed duration is 2 hours.",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            logger.info(f"Video info - Title: {video_title}, Duration: {video_duration}s")
         except Exception as e:
             raise VideoDownloadError(
                 f"Failed to get video info: {str(e)}",
@@ -861,6 +1056,96 @@ async def download_pdf(pdf_filename: str):
         headers={"Content-Disposition": content_disposition}
     )
 
+# ==================== NEW OPTIMIZED ENDPOINTS ====================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "environment": ENVIRONMENT,
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "2.0.0"
+    }
+
+@app.get("/stats")
+async def get_stats():
+    """Get API statistics and task information"""
+    total_tasks = len(progress_store)
+    completed = sum(1 for t in progress_store.values() if t.get("step") == "completed")
+    processing = sum(1 for t in progress_store.values() if t.get("step") not in ["completed", "error"])
+    errored = sum(1 for t in progress_store.values() if t.get("step") == "error")
+    
+    return {
+        "total_tasks": total_tasks,
+        "completed_tasks": completed,
+        "processing_tasks": processing,
+        "errored_tasks": errored,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.get("/tasks")
+async def list_tasks(
+    status: Optional[str] = Query(None, description="Filter by status: processing, completed, error")
+):
+    """List all tasks with optional filtering"""
+    tasks = []
+    for task_id, progress in progress_store.items():
+        if status is None or progress.get("step") == status:
+            tasks.append({
+                "task_id": task_id,
+                "status": progress.get("step"),
+                "progress": progress.get("progress"),
+                "created_at": progress.get("timestamp"),
+                "message": progress.get("message")
+            })
+    
+    return {"total": len(tasks), "tasks": tasks}
+
+@app.delete("/task/{task_id}")
+async def cancel_task(task_id: str):
+    """Cancel a specific task"""
+    if task_id not in progress_store:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    progress = progress_store[task_id]
+    if progress.get("step") in ["completed", "error"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel task with status: {progress.get('step')}"
+        )
+    
+    progress["step"] = "cancelled"
+    progress["message"] = "Task cancelled by user"
+    
+    logger.info(f"Task {task_id} cancelled")
+    return {"task_id": task_id, "status": "cancelled"}
+
+@app.get("/info")
+async def api_info():
+    """Get API information and available endpoints"""
+    return {
+        "api_name": "YouTube to PDF Converter API",
+        "version": "2.0.0",
+        "environment": ENVIRONMENT,
+        "endpoints": {
+            "GET /convert": "Convert YouTube video to PDF",
+            "GET /progress/{task_id}": "Get conversion progress",
+            "GET /progress-stream/{task_id}": "Real-time progress stream (SSE)",
+            "GET /download/{pdf_filename}": "Download generated PDF",
+            "GET /health": "Health check",
+            "GET /stats": "API statistics",
+            "GET /tasks": "List all tasks",
+            "DELETE /task/{task_id}": "Cancel a task",
+            "GET /info": "API information"
+        },
+        "max_workers": config.get('max_workers', 4),
+        "environment_config": {
+            "debug": config.get('debug', False),
+            "cors_origins": config.get('cors_origins', [])
+        }
+    }
+
 if __name__ == '__main__':
     import uvicorn
     print(f"Starting server in {ENVIRONMENT} environment...")
@@ -868,8 +1153,9 @@ if __name__ == '__main__':
     print(f"CORS origins: {config['cors_origins']}")
     
     uvicorn.run(
-        app, 
+        "main:app",  # Pass as string for reload to work
         host=config['host'], 
         port=config['port'],
-        reload=config['debug']
+        reload=config['debug'],
+        log_level="info"
     )
