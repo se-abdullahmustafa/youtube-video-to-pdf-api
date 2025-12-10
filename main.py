@@ -43,6 +43,25 @@ def setup_logging():
         logging.getLogger(name).setLevel(logging.WARNING)
     return logging.getLogger(__name__)
 
+def setup_conversion_logger(task_id: str):
+    """Create a dedicated logger for conversion tasks"""
+    conversion_logger = logging.getLogger(f"conversion.{task_id}")
+    conversion_logger.setLevel(logging.INFO)
+    conversion_logger.handlers.clear()
+    
+    # Create formatter for conversion logs
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # File handler for individual conversion logs
+    log_file = os.path.join(LOGS_DIR, f'conversions', f'{task_id}_conversion.log')
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setFormatter(formatter)
+    conversion_logger.addHandler(file_handler)
+    
+    return conversion_logger
+
 logger = setup_logging()
 executor = ThreadPoolExecutor(max_workers=config['max_workers'])
 
@@ -180,29 +199,83 @@ def create_pdf(frames_folder: str, output_path: str):
 
 # ==================== BACKGROUND TASK ====================
 async def background_convert(task_id: str, youtube_url: str, interval_minutes: int):
+    conv_logger = setup_conversion_logger(task_id)
+    
     try:
+        conv_logger.info(f"===== CONVERSION STARTED =====")
+        conv_logger.info(f"Task ID: {task_id}")
+        conv_logger.info(f"YouTube URL: {youtube_url}")
+        conv_logger.info(f"Frame interval: {interval_minutes} minute(s)")
+        
         task_folder = os.path.join(TEMP_DIR, task_id)
         os.makedirs(task_folder, exist_ok=True)
+        conv_logger.info(f"Task folder created: {task_folder}")
         
+        # Download video
+        conv_logger.info(f"[STEP 1/4] Downloading video...")
         TaskManager.update_task(task_id, 20, "Downloading...")
         video_path = os.path.join(task_folder, 'video.mp4')
+        start_download = time.time()
         title = await asyncio.get_event_loop().run_in_executor(executor, download_video, youtube_url, video_path)
+        download_duration = time.time() - start_download
         
+        if os.path.exists(video_path):
+            video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            conv_logger.info(f"Video downloaded successfully")
+            conv_logger.info(f"  Title: {title}")
+            conv_logger.info(f"  Size: {video_size_mb:.2f} MB")
+            conv_logger.info(f"  Duration: {download_duration:.2f}s")
+        
+        # Extract frames
+        conv_logger.info(f"[STEP 2/4] Extracting frames at {interval_minutes} minute interval...")
         TaskManager.update_task(task_id, 50, "Extracting frames...")
         frames_folder = os.path.join(task_folder, 'frames')
         os.makedirs(frames_folder, exist_ok=True)
+        start_extract = time.time()
         frame_count = await asyncio.get_event_loop().run_in_executor(executor, extract_frames, video_path, frames_folder, interval_minutes * 60)
+        extract_duration = time.time() - start_extract
         
+        conv_logger.info(f"Frames extracted successfully")
+        conv_logger.info(f"  Total frames: {frame_count}")
+        conv_logger.info(f"  Duration: {extract_duration:.2f}s")
+        
+        # Create PDF
+        conv_logger.info(f"[STEP 3/4] Creating PDF document...")
         TaskManager.update_task(task_id, 80, f"Creating PDF ({frame_count} frames)...")
-        pdf_filename = f"{task_id}.pdf"
-        pdf_path = os.path.join(TEMP_DIR, pdf_filename)
-        await asyncio.get_event_loop().run_in_executor(executor, create_pdf, frames_folder, pdf_path)
         
+        # Generate PDF filename with video title and timestamp
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        # Sanitize title for use in filename
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', title.strip())[:100]
+        pdf_filename = f"{safe_title}_{timestamp}.pdf"
+        pdf_path = os.path.join(TEMP_DIR, pdf_filename)
+        
+        start_pdf = time.time()
+        await asyncio.get_event_loop().run_in_executor(executor, create_pdf, frames_folder, pdf_path)
+        pdf_duration = time.time() - start_pdf
+        
+        if os.path.exists(pdf_path):
+            pdf_size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
+            conv_logger.info(f"PDF created successfully")
+            conv_logger.info(f"  Filename: {pdf_filename}")
+            conv_logger.info(f"  Size: {pdf_size_mb:.2f} MB")
+            conv_logger.info(f"  Duration: {pdf_duration:.2f}s")
+        
+        # Cleanup and complete
+        conv_logger.info(f"[STEP 4/4] Cleaning up and finalizing...")
         shutil.rmtree(task_folder, ignore_errors=True)
         TaskManager.complete_task(task_id, pdf_filename)
-        logger.info(f"Task {task_id} completed")
+        
+        total_duration = download_duration + extract_duration + pdf_duration
+        conv_logger.info(f"===== CONVERSION COMPLETED SUCCESSFULLY =====")
+        conv_logger.info(f"Total time: {total_duration:.2f}s")
+        conv_logger.info(f"Output: {pdf_filename}")
+        logger.info(f"Task {task_id} completed - PDF: {pdf_filename}")
         
     except Exception as e:
+        conv_logger.error(f"===== CONVERSION FAILED =====")
+        conv_logger.error(f"Error: {str(e)}")
+        conv_logger.error(f"Exception type: {type(e).__name__}", exc_info=True)
         TaskManager.error_task(task_id, str(e))
         logger.error(f"Task {task_id} failed: {str(e)}")
         shutil.rmtree(os.path.join(TEMP_DIR, task_id), ignore_errors=True)
