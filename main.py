@@ -206,20 +206,16 @@ def create_pdf(frames_folder: str, output_path: str):
         if not frames:
             raise Exception("No frames extracted")
         
-        # Get first frame dimensions to set PDF size (use pixels as units)
-        first_frame_path = os.path.join(frames_folder, frames[0])
-        with Image.open(first_frame_path) as img:
-            width_px, height_px = img.size
+        # Create PDF with A4 size in landscape orientation
+        pdf = FPDF(orientation='L', unit='mm', format='A4')
+        pdf.set_margins(0, 0, 0)  # No margins
         
-        # Create PDF with custom page size matching frame dimensions in pixels
-        # Using 'px' unit means 1 unit = 1 pixel (approximately 0.26mm at 96 DPI)
-        pdf = FPDF(orientation='P' if width_px < height_px else 'L', unit='px', format=(width_px, height_px))
-        
+        # A4 landscape dimensions: 297mm width × 210mm height
         for frame_file in frames:
             try:
                 pdf.add_page()
-                # Add image to fill entire page (frame already has timestamp)
-                pdf.image(os.path.join(frames_folder, frame_file), x=0, y=0, w=width_px, h=height_px)
+                # Add image to fill entire A4 landscape page
+                pdf.image(os.path.join(frames_folder, frame_file), x=0, y=0, w=297, h=210)
             except:
                 continue
         
@@ -229,14 +225,14 @@ def create_pdf(frames_folder: str, output_path: str):
         raise
 
 # ==================== BACKGROUND TASK ====================
-async def background_convert(task_id: str, youtube_url: str, interval_minutes: int):
+async def background_convert(task_id: str, youtube_url: str, interval_seconds: int):
     conv_logger = get_conversion_logger()
     
     try:
         conv_logger.info(f"===== CONVERSION STARTED =====")
         conv_logger.info(f"Task ID: {task_id}")
         conv_logger.info(f"YouTube URL: {youtube_url}")
-        conv_logger.info(f"Frame interval: {interval_minutes} minute(s)")
+        conv_logger.info(f"Frame interval: {interval_seconds} second(s)")
         
         task_folder = os.path.join(TEMP_DIR, task_id)
         os.makedirs(task_folder, exist_ok=True)
@@ -258,12 +254,12 @@ async def background_convert(task_id: str, youtube_url: str, interval_minutes: i
             conv_logger.info(f"  Duration: {download_duration:.2f}s")
         
         # Extract frames
-        conv_logger.info(f"[STEP 2/4] Extracting frames at {interval_minutes} minute interval...")
+        conv_logger.info(f"[STEP 2/4] Extracting frames at {interval_seconds} second interval...")
         TaskManager.update_task(task_id, 50, "Extracting frames...")
         frames_folder = os.path.join(task_folder, 'frames')
         os.makedirs(frames_folder, exist_ok=True)
         start_extract = time.time()
-        frame_count = await asyncio.get_event_loop().run_in_executor(executor, extract_frames, video_path, frames_folder, interval_minutes * 60)
+        frame_count = await asyncio.get_event_loop().run_in_executor(executor, extract_frames, video_path, frames_folder, interval_seconds)
         extract_duration = time.time() - start_extract
         
         conv_logger.info(f"Frames extracted successfully")
@@ -322,7 +318,7 @@ async def health():
     return {"status": "healthy", "active_tasks": len(active_tasks), "environment": ENVIRONMENT}
 
 @app.get("/convert", tags=["Conversion"], name="convert")
-async def convert(youtube_url: str = Query(..., description="YouTube URL"), time_interval: int = Query(1, ge=1, le=60, description="Minutes between frames")):
+async def convert(youtube_url: str = Query(..., description="YouTube URL"), time_interval: int = Query(60, ge=1, le=3600, description="Seconds between frames")):
     """Start conversion and return related endpoints"""
     try:
         task_id = str(uuid.uuid4())
