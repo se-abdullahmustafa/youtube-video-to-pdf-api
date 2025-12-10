@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-video-to-pdf-api"
+version = "1.0.0"
+description = "High-performance API for converting YouTube videos to PDFs"
+requires-python = ">=3.8"
+
+[tool.watchfiles]
+ignore = [
+    "temp/",
+    "logs/",
+    "__pycache__/",
+    "*.pyc",
+    ".git/",
+    ".venv/",
+    "venv/",
+    "*.log"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
