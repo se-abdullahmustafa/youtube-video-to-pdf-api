@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from concurrent.futures import ThreadPoolExecutor
 from fpdf import FPDF
+from PIL import Image
 from fastapi import FastAPI, Query, HTTPException, status, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -144,7 +145,8 @@ class TaskManager:
 # ==================== VIDEO PROCESSING ====================
 def download_video(youtube_url: str, output_path: str) -> str:
     try:
-        opts = {'format': 'best[ext=mp4]', 'outtmpl': output_path, 'quiet': True, 'no_warnings': True}
+        # Format: best video at max 480p with audio, fallback to best available
+        opts = {'format': 'best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]', 'outtmpl': output_path, 'quiet': True, 'no_warnings': True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(youtube_url, download=True)
             return info.get('title', 'video')
@@ -168,6 +170,26 @@ def extract_frames(video_path: str, output_folder: str, interval_seconds: int) -
             success, frame = cap.read()
             if not success:
                 break
+            
+            # Add timestamp to top-right corner
+            timestamp_seconds = int(frame_idx / fps)
+            hours = timestamp_seconds // 3600
+            minutes = (timestamp_seconds % 3600) // 60
+            seconds = timestamp_seconds % 60
+            timestamp_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            
+            # Add timestamp text to top-right corner
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            color = (255, 255, 255)  # White text
+            text_size = cv2.getTextSize(timestamp_str, font, font_scale, thickness)[0]
+            x = frame.shape[1] - text_size[0] - 10  # 10px margin from right
+            y = text_size[1] + 10  # 10px margin from top
+            # Add black background for better readability
+            cv2.rectangle(frame, (x - 5, y - text_size[1] - 5), (x + text_size[0] + 5, y + 5), (0, 0, 0), -1)
+            cv2.putText(frame, timestamp_str, (x, y), font, font_scale, color, thickness)
+            
             cv2.imwrite(os.path.join(output_folder, f'frame_{frame_count:04d}.jpg'), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frame_count += 1
             frame_idx += int(frame_interval)
@@ -184,11 +206,24 @@ def create_pdf(frames_folder: str, output_path: str):
         if not frames:
             raise Exception("No frames extracted")
         
-        pdf = FPDF(orientation='P', unit='mm', format='A4')
+        # Get first frame dimensions to set PDF size
+        first_frame_path = os.path.join(frames_folder, frames[0])
+        with Image.open(first_frame_path) as img:
+            width_px, height_px = img.size
+        
+        # Convert pixels to mm (assuming 96 DPI)
+        dpi = 96
+        width_mm = (width_px / dpi) * 25.4
+        height_mm = (height_px / dpi) * 25.4
+        
+        # Create PDF with custom page size matching frame dimensions
+        pdf = FPDF(orientation='P' if width_mm < height_mm else 'L', unit='mm', format=(width_mm, height_mm))
+        
         for frame_file in frames:
             try:
                 pdf.add_page()
-                pdf.image(os.path.join(frames_folder, frame_file), x=10, y=10, w=190)
+                # Add image to fill entire page
+                pdf.image(os.path.join(frames_folder, frame_file), x=0, y=0, w=width_mm, h=height_mm)
             except:
                 continue
         
