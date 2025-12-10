@@ -43,20 +43,20 @@ def setup_logging():
         logging.getLogger(name).setLevel(logging.WARNING)
     return logging.getLogger(__name__)
 
-def setup_conversion_logger(task_id: str):
-    """Create a dedicated logger for conversion tasks"""
-    conversion_logger = logging.getLogger(f"conversion.{task_id}")
+def get_conversion_logger():
+    """Get the shared conversion logger for all tasks"""
+    conversion_logger = logging.getLogger('conversions')
+    if conversion_logger.handlers:
+        return conversion_logger
+    
     conversion_logger.setLevel(logging.INFO)
-    conversion_logger.handlers.clear()
     
     # Create formatter for conversion logs
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     
-    # File handler for individual conversion logs
-    log_file = os.path.join(LOGS_DIR, f'conversions', f'{task_id}_conversion.log')
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    
-    file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+    # File handler for unified conversion log
+    log_file = os.path.join(LOGS_DIR, 'conversions.log')
+    file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
     file_handler.setFormatter(formatter)
     conversion_logger.addHandler(file_handler)
     
@@ -199,7 +199,7 @@ def create_pdf(frames_folder: str, output_path: str):
 
 # ==================== BACKGROUND TASK ====================
 async def background_convert(task_id: str, youtube_url: str, interval_minutes: int):
-    conv_logger = setup_conversion_logger(task_id)
+    conv_logger = get_conversion_logger()
     
     try:
         conv_logger.info(f"===== CONVERSION STARTED =====")
