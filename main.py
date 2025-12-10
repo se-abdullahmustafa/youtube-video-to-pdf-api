@@ -206,24 +206,20 @@ def create_pdf(frames_folder: str, output_path: str):
         if not frames:
             raise Exception("No frames extracted")
         
-        # Get first frame dimensions to set PDF size
+        # Get first frame dimensions to set PDF size (use pixels as units)
         first_frame_path = os.path.join(frames_folder, frames[0])
         with Image.open(first_frame_path) as img:
             width_px, height_px = img.size
         
-        # Convert pixels to mm (assuming 96 DPI)
-        dpi = 96
-        width_mm = (width_px / dpi) * 25.4
-        height_mm = (height_px / dpi) * 25.4
-        
-        # Create PDF with custom page size matching frame dimensions
-        pdf = FPDF(orientation='P' if width_mm < height_mm else 'L', unit='mm', format=(width_mm, height_mm))
+        # Create PDF with custom page size matching frame dimensions in pixels
+        # Using 'px' unit means 1 unit = 1 pixel (approximately 0.26mm at 96 DPI)
+        pdf = FPDF(orientation='P' if width_px < height_px else 'L', unit='px', format=(width_px, height_px))
         
         for frame_file in frames:
             try:
                 pdf.add_page()
-                # Add image to fill entire page
-                pdf.image(os.path.join(frames_folder, frame_file), x=0, y=0, w=width_mm, h=height_mm)
+                # Add image to fill entire page (frame already has timestamp)
+                pdf.image(os.path.join(frames_folder, frame_file), x=0, y=0, w=width_px, h=height_px)
             except:
                 continue
         
