@@ -84,6 +84,24 @@ def get_conversion_logger():
 logger = setup_logging()
 executor = ThreadPoolExecutor(max_workers=config['max_workers'])
 
+# ==================== LIFECYCLE ====================
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info(f"Starting server in {ENVIRONMENT} mode with max {config['max_tasks']} concurrent tasks")
+    cleanup_task_handle = asyncio.create_task(cleanup_task())
+    
+    yield  # This is where the application runs
+    
+    # Shutdown
+    cleanup_task_handle.cancel()
+    try:
+        await cleanup_task_handle
+    except asyncio.CancelledError:
+        pass
+
 # ==================== APP SETUP ====================
 app = FastAPI(
     title="YouTube to PDF API",
@@ -91,7 +109,8 @@ app = FastAPI(
     description="Fast & reliable YouTube to PDF converter",
     docs_url="/docs",
     redoc_url=None,
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    lifespan=lifespan
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
@@ -399,12 +418,23 @@ async def background_convert(task_id: str, youtube_url: str, interval_seconds: i
 # Track PDF downloads
 pdf_downloads: Dict[str, bool] = {}
 
-# ==================== STARTUP ====================
-@app.on_event("startup")
-async def startup_event():
-    """Initialize background cleanup task"""
+# ==================== LIFECYCLE ====================
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     logger.info(f"Starting server in {ENVIRONMENT} mode with max {config['max_tasks']} concurrent tasks")
-    asyncio.create_task(cleanup_task())
+    cleanup_task_handle = asyncio.create_task(cleanup_task())
+    
+    yield  # This is where the application runs
+    
+    # Shutdown
+    cleanup_task_handle.cancel()
+    try:
+        await cleanup_task_handle
+    except asyncio.CancelledError:
+        pass
 
 async def cleanup_task():
     """Periodically clean up old tasks and temporary files"""
