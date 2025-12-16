@@ -295,6 +295,7 @@ class TaskManager:
 def download_video(youtube_url: str, output_path: str, task_id: str = None, progress_callback=None) -> tuple:
     """
     Download YouTube video with progress tracking and optimized format selection.
+    Uses yt-dlp internal fragment threading plus our executor to stay non-blocking for FastAPI.
     Returns: (title, quality, size_mb)
     """
     try:
@@ -314,6 +315,9 @@ def download_video(youtube_url: str, output_path: str, task_id: str = None, prog
             'worstvideo[height<=480][vcodec!*=av01]'                           # Worst 480p, no AV1
         )
 
+        # Bound per-download fragment threads to stay within overall executor capacity
+        fragment_threads = max(4, min(16, config['max_workers']))
+
         opts = {
             'format': format_selector,
             'outtmpl': output_path,
@@ -321,7 +325,7 @@ def download_video(youtube_url: str, output_path: str, task_id: str = None, prog
             'no_warnings': True,
             'socket_timeout': 60,
             'http_chunk_size': 10485760,  # 10MB chunks for better performance
-            'concurrent_fragment_downloads': 16,  # Maximum parallel fragment downloads for speed
+            'concurrent_fragment_downloads': fragment_threads,  # Threaded fragment downloads
             'retries': 10,  # More retries for reliability
             'fragment_retries': 10,
             'file_access_retries': 3,
