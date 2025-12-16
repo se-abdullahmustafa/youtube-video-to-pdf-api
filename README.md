@@ -72,38 +72,6 @@ This API converts YouTube videos to PDF by:
 - **Error Handling**: Graceful degradation and recovery
 - **Resource Management**: Automatic cleanup of temporary files
 
-## ✨ Key Features
-
-### Core Functionality
-
-- **YouTube to PDF Conversion**: Extract frames at configurable intervals
-- **High Performance**: Asynchronous processing with yt-dlp for robust downloads
-- **Real-time Tracking**: Server-Sent Events (SSE) for live progress updates
-- **Minimal Footprint**: Optimized codebase (72% reduction in code size)
-
-### Performance & Scalability
-
-- **Auto-Scaling**: Thread pool with 8-32 workers (local to production)
-- **High Concurrency**: Handles 500-2000 concurrent tasks with graceful degradation
-- **Efficient Processing**: Memory-efficient frame extraction and PDF generation
-- **Caching**: Optional caching of frequently accessed videos
-
-### Developer Experience
-
-- **RESTful API**: Clean, intuitive endpoints
-- **CORS Enabled**: Web application integration ready
-- **Gzip Compression**: Automatic response compression for efficiency
-- **Comprehensive Logging**: Rotating file logs with configurable verbosity
-- **Task Management**: List, track, and cancel conversion tasks
-- **Health Checks**: Built-in monitoring endpoints
-
-### Security & Reliability
-
-- **Input Validation**: Comprehensive request validation
-- **Rate Limiting**: Protection against abuse
-- **Error Handling**: Graceful degradation and recovery
-- **Resource Management**: Automatic cleanup of temporary files
-
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -137,6 +105,27 @@ cp .env.example .env
 # Start the development server
 python main.py
 ```
+
+### Running locally in a Python venv (FastAPI + uvicorn)
+
+```bash
+python -m venv .venv
+. .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env  # update values as needed
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- Visit `http://localhost:8000/docs` for the Swagger UI.
+- Windows PowerShell shortcut (from repo root):
+  ```powershell
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install -r requirements.txt
+  Copy-Item .env.example .env
+  uvicorn main:app --reload --host 0.0.0.0 --port 8000
+  ```
+- Logs write to `logs/app.log`; PDFs land in `temp/`.
 
 ### Using Docker
 
@@ -193,35 +182,84 @@ docker run -p 8000:8000 --env-file .env youtube-to-pdf-api
 
 ### Production Deployment
 
-For production, it's recommended to use:
+For production, use a Python venv, Gunicorn (with Uvicorn workers), and a reverse proxy.
+Example for Ubuntu/Debian VPS:
 
-- Gunicorn with Uvicorn workers
-- A reverse proxy like Nginx
-- Process manager like systemd or Supervisor
-- Monitoring and logging solutions
+```bash
+# On the VPS
+sudo apt-get update && sudo apt-get install -y python3-venv ffmpeg
+git clone https://github.com/yourusername/youtube-video-to-pdf-api.git
+cd youtube-video-to-pdf-api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # set ENVIRONMENT=production, HOST, PORT, PROXY_URL (optional)
+gunicorn -k uvicorn.workers.UvicornWorker main:app -b 0.0.0.0:8000 --workers 4 --timeout 120
+```
+
+Optional systemd service (`/etc/systemd/system/youtube-to-pdf.service`):
+
+```ini
+[Unit]
+Description=YouTube to PDF API
+After=network.target
+
+[Service]
+User=www-data
+WorkingDirectory=/opt/youtube-video-to-pdf-api
+ExecStart=/opt/youtube-video-to-pdf-api/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker main:app -b 0.0.0.0:8000 --workers 4 --timeout 120
+Restart=always
+EnvironmentFile=/opt/youtube-video-to-pdf-api/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable with:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now youtube-to-pdf.service
+```
+
+Recommended extras:
+
+- Reverse proxy (Nginx/Caddy) to terminate TLS and forward to `localhost:8000`.
+- systemd service for auto-start and restart on crash.
+- Log rotation (already enabled via `logs/app.log`), plus external monitoring.
 
 ### Environment Variables
 
-Configuration is managed through environment variables. Copy `.env.example` to `.env` and modify as needed:
+Configuration is managed through environment variables. Create a `.env` file in the project root and modify as needed:
 
 ```ini
-# Application
-ENVIRONMENT=development  # or 'production'
-LOG_LEVEL=info
+# Application Environment
+ENVIRONMENT=local  # Options: local, production
+
+# Server Configuration
+HOST=0.0.0.0
 PORT=8000
 
-# Rate Limiting
-RATE_LIMIT=100  # requests per minute per IP
-MAX_CONCURRENT_DOWNLOADS=5
+# Debug Settings
+DEBUG=true  # Set to false in production
 
-# Paths
-TEMP_DIR=./temp
-LOG_DIR=./logs
+# Thread Pool Configuration
+MAX_WORKERS=16  # Number of worker threads (increase for more concurrent downloads)
+MAX_TASKS=500  # Maximum concurrent tasks
 
-# Advanced
-WORKERS=8  # Number of worker processes
-THREADS=4  # Threads per worker
+# Cleanup Configuration
+CLEANUP_HOURS=24  # Hours to keep completed tasks before cleanup
+CLEANUP_INTERVAL=3600  # Cleanup interval in seconds (default: 1 hour)
+
+# Directory Configuration
+TEMP_DIR=temp  # Temporary files directory
+LOGS_DIR=logs  # Log files directory
+
+# Proxy Configuration (optional)
+# PROXY_URL=http://proxy.example.com:8080
 ```
+
+**Note:** If `.env` file doesn't exist, the application will use default values. The port defaults to 8000.
 
 ## �� Installation
 
@@ -324,7 +362,7 @@ curl "http://localhost:8000/convert?youtube_url=https://www.youtube.com/watch?v=
 
 ### Progress Tracking
 
-**`GET /progress/{task_id}`** - Get current task progress
+**`GET /progress/{task_id}`** - Get current task progress with download size information
 
 ```json
 {
@@ -332,11 +370,33 @@ curl "http://localhost:8000/convert?youtube_url=https://www.youtube.com/watch?v=
   "status": "processing",
   "progress": 45,
   "message": "Extracting frames...",
-  "created_at": "2025-12-10T08:00:00"
+  "total_size_mb": 15.2,
+  "downloaded_size_mb": 15.2,
+  "download_percentage": 100.0,
+  "created_at": "2025-12-10T08:00:00",
+  "updated_at": "2025-12-10T08:01:30"
 }
 ```
 
-**`GET /stream/{task_id}`** - Real-time progress stream (SSE)
+**`GET /stream/{task_id}`** - Real-time progress stream (SSE) with download size tracking
+
+Returns real-time updates including:
+
+- `total_size_mb`: Total video size in MB
+- `downloaded_size_mb`: Currently downloaded size in MB
+- `download_percentage`: Download completion percentage (0-100%)
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "processing",
+  "progress": 10,
+  "message": "Downloading... 2.5/15.2 MB (16.4%) - 1.2 MB/s",
+  "total_size_mb": 15.2,
+  "downloaded_size_mb": 2.5,
+  "download_percentage": 16.4
+}
+```
 
 ```bash
 curl -N "http://localhost:8000/stream/550e8400-e29b-41d4-a716-446655440000" \
@@ -408,14 +468,17 @@ DEBUG=true|false               # Default: true for local
 
 ### Environment-Specific Settings
 
-| Setting              | Local  | Production |
-| -------------------- | ------ | ---------- |
-| Max Workers          | 8      | 32         |
-| Max Concurrent Tasks | 500    | 2000       |
-| Task Timeout         | 1 hour | 2 hours    |
-| Debug Mode           | ON     | OFF        |
-| Log Level            | INFO   | WARNING    |
-| Auto-reload          | YES    | NO         |
+| Setting              | Local      | Production |
+| -------------------- | ---------- | ---------- |
+| Max Workers          | 16         | 128        |
+| Max Concurrent Tasks | 500        | 5000       |
+| Concurrent Downloads | 16 threads | 16 threads |
+| Max Resolution       | 480p       | 480p       |
+| Video Format         | Video-only | Video-only |
+| Task Timeout         | 1 hour     | 2 hours    |
+| Debug Mode           | ON         | OFF        |
+| Log Level            | INFO       | WARNING    |
+| Auto-reload          | YES        | NO         |
 
 ## 📊 Performance Metrics
 
@@ -496,17 +559,22 @@ convertVideo("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 2);
 
 ## 📦 Dependencies
 
+All dependencies use latest stable versions:
+
 ```
-fastapi==0.124.0              # Web framework
-uvicorn[standard]==0.38.0     # ASGI server
-fpdf2==2.8.5                  # PDF generation
-opencv-python-headless==4.12.0.88  # Video processing
-yt-dlp==2025.12.8             # YouTube downloading
-Pillow==12.0.0                # Image processing
-pydantic==2.12.5              # Data validation
-pydantic-settings==2.12.0     # Configuration
-python-multipart==0.0.7       # Form data parsing
+fastapi>=0.115.0              # Web framework
+uvicorn[standard]>=0.32.0     # ASGI server
+fpdf2>=2.8.5                  # PDF generation
+opencv-python-headless>=4.12.0.88  # Video processing
+yt-dlp>=2025.12.8             # YouTube downloading with multi-threading
+Pillow>=12.0.0                # Image processing
+pydantic>=2.12.5              # Data validation
+pydantic-settings>=2.12.0     # Configuration
+python-multipart>=0.0.20      # Form data parsing
+python-dotenv>=1.2.1          # Environment variable management
 ```
+
+Install with: `pip install -r requirements.txt`
 
 ## 🐛 Troubleshooting
 
